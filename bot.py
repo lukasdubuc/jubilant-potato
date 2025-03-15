@@ -1,130 +1,156 @@
 import nest_asyncio
 import os
 import asyncio
+import threading
+import logging
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
-# ✅ Prevent async issues
+# ✅ Prevent async issues with nested event loops
 nest_asyncio.apply()
 
-# ✅ Set up Flask server (Keeps Railway from shutting down)
+# ✅ Configure logging for debugging and monitoring
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ✅ Set up Flask server (keeps the app alive on platforms like Railway)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is ready, but inactive until you start it."
+    return "AI Business Hub is ready but inactive until started via Telegram."
 
-# ✅ Get Bot Token & Password from Railway Variables
+# ✅ Load environment variables
 TOKEN = os.getenv("BOT_TOKEN")
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD")
 
-# ✅ Track authorized users & bot status
-authorized_users = set()
-pending_password_request = set()
-bot_active = False  # ✅ New: Bot is OFF by default
+if not TOKEN or not ACCESS_PASSWORD:
+    logger.error("BOT_TOKEN or ACCESS_PASSWORD not set in environment variables.")
+    raise ValueError("Missing required environment variables.")
 
-# ✅ Chatbot responses
+# ✅ Global state management
+class HubState:
+    def __init__(self):
+        self.authorized_users = set()          # Tracks users with access
+        self.pending_password_request = set()  # Tracks users awaiting password
+        self.bot_active = False                # Bot starts inactive
+
+state = HubState()
+
+# ✅ Chatbot response logic (expandable for future AI features)
 def chatbot_response(user_input):
     responses = {
         "hi": "Hello! How can I assist you today?",
         "hello": "Hey there! What’s on your mind?",
-        "how are you": "I'm just an AI, but I'm doing great! How about you?",
-        "what can you do": "I can chat, help with business automation, and assist with product creation. Some features require a password.",
-        "who are you": "I'm your AI assistant, here to help you manage and grow your business!",
+        "how are you": "I'm an AI hub, always ready to help! How about you?",
+        "what can you do": "I'm the central hub for your business! I can chat, manage worker bots, and unlock advanced features with a password.",
+        "who are you": "I'm Grok 3, your AI business hub, built by xAI to streamline your operations!"
     }
-    return responses.get(user_input.lower(), "I'm here to chat! Let me know how I can help.")
+    return responses.get(user_input.lower(), "I’m here to assist! How can I support your business today?")
 
-# ✅ Start the bot manually
+# ✅ Command: Start the bot
 async def startbot(update: Update, context: CallbackContext):
-    global bot_active
-    bot_active = True
-    await update.message.reply_text("✅ The bot is now active! You can chat and use commands.")
+    state.bot_active = True
+    await update.message.reply_text("✅ AI Business Hub is now active! Use `/auth` for advanced features or chat with me.")
+    logger.info("Bot activated.")
 
-# ✅ Stop the bot manually
+# ✅ Command: Stop the bot
 async def stopbot(update: Update, context: CallbackContext):
-    global bot_active
-    bot_active = False
-    await update.message.reply_text("❌ The bot has been deactivated. Type `/startbot` when you need it again.")
-    print("Bot has been manually stopped.")
+    state.bot_active = False
+    await update.message.reply_text("❌ AI Business Hub deactivated. Use `/startbot` to reactivate.")
+    logger.info("Bot deactivated.")
 
-# ✅ Handle messages (only if bot is active)
+# ✅ Handle chat messages (only when bot is active)
 async def chat(update: Update, context: CallbackContext):
-    global bot_active
-    if not bot_active:
-        return  # ✅ Ignore messages when the bot is off
+    if not state.bot_active:
+        return  # Ignore if bot is inactive
 
     user_text = update.message.text.strip()
     response = chatbot_response(user_text)
     await update.message.reply_text(response)
+    logger.info(f"Chat response sent: {response}")
 
-# ✅ Request Password (Only if bot is active)
+# ✅ Command: Request password for authorization
 async def request_password(update: Update, context: CallbackContext):
-    global bot_active
-    if not bot_active:
-        return  # ✅ Ignore if the bot is off
+    if not state.bot_active:
+        return  # Ignore if bot is inactive
 
     user_id = update.message.from_user.id
-    if user_id in authorized_users:
-        await update.message.reply_text("✅ You are already authorized!")
+    if user_id in state.authorized_users:
+        await update.message.reply_text("✅ You’re already authorized!")
         return
 
-    pending_password_request.add(user_id)
+    state.pending_password_request.add(user_id)
     await update.message.reply_text("🔑 Please enter the password:")
+    logger.info(f"Password requested by user {user_id}")
 
-# ✅ Check Password (Only if bot is active)
+# ✅ Check password input
 async def check_password(update: Update, context: CallbackContext):
-    global bot_active
-    if not bot_active:
-        return  # ✅ Ignore if the bot is off
+    if not state.bot_active:
+        return  # Ignore if bot is inactive
 
     user_id = update.message.from_user.id
     user_text = update.message.text.strip()
 
-    if user_id not in pending_password_request:
-        await chat(update, context)  # ✅ Handle as a normal chat message
-        return  
-
-    if user_text == ACCESS_PASSWORD:
-        authorized_users.add(user_id)
-        pending_password_request.remove(user_id)  
-        await update.message.reply_text("✅ Access granted! You can now use advanced features.")
-    else:
-        await update.message.reply_text("❌ Incorrect password. Try again.")
-
-# ✅ Advanced Features (Only if bot is active)
-async def advanced_services(update: Update, context: CallbackContext):
-    global bot_active
-    if not bot_active:
-        return  # ✅ Ignore if the bot is off
-
-    user_id = update.message.from_user.id
-    if user_id not in authorized_users:
-        await update.message.reply_text("🔒 You need to enter the password first. Type `/auth` to enter it.")
+    if user_id not in state.pending_password_request:
+        await chat(update, context)  # Treat as normal chat message
         return
 
-    await update.message.reply_text("🚀 Advanced services are available! What would you like to do today?")
+    if user_text == ACCESS_PASSWORD:
+        state.authorized_users.add(user_id)
+        state.pending_password_request.remove(user_id)
+        await update.message.reply_text("✅ Access granted! Use `/services` for advanced features.")
+        logger.info(f"User {user_id} authorized.")
+    else:
+        await update.message.reply_text("❌ Incorrect password. Try again.")
+        logger.warning(f"Failed password attempt by user {user_id}")
 
-# ✅ Initialize Telegram Bot
-bot_app = Application.builder().token(TOKEN).build()
+# ✅ Command: Access advanced services (placeholder for worker bot integration)
+async def advanced_services(update: Update, context: CallbackContext):
+    if not state.bot_active:
+        return  # Ignore if bot is inactive
 
-# ✅ Add Handlers
-bot_app.add_handler(CommandHandler("startbot", startbot))  # ✅ Start bot manually
-bot_app.add_handler(CommandHandler("stopbot", stopbot))    # ✅ Stop bot manually
-bot_app.add_handler(CommandHandler("auth", request_password))
-bot_app.add_handler(CommandHandler("services", advanced_services))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_password))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    user_id = update.message.from_user.id
+    if user_id not in state.authorized_users:
+        await update.message.reply_text("🔒 Authorization required. Use `/auth` to enter the password.")
+        return
 
-print("Bot is ready, but inactive until started.")
+    await update.message.reply_text("🚀 Welcome to advanced services! Options:\n1. Manage worker bots\n2. Analyze data\n3. Automate tasks\nWhat would you like to do?")
+    logger.info(f"User {user_id} accessed advanced services.")
 
-# ✅ Run Flask & Telegram Bot
-import threading
+# ✅ Initialize Telegram bot
+async def init_bot():
+    bot_app = Application.builder().token(TOKEN).build()
 
+    # Add command and message handlers
+    bot_app.add_handler(CommandHandler("startbot", startbot))
+    bot_app.add_handler(CommandHandler("stopbot", stopbot))
+    bot_app.add_handler(CommandHandler("auth", request_password))
+    bot_app.add_handler(CommandHandler("services", advanced_services))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_password))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+
+    logger.info("Bot initialized, starting polling...")
+    await bot_app.run_polling()
+
+# ✅ Run Flask server in a separate thread
 def run_flask():
-    app.run(host="0.0.0.0", port=5000)
+    logger.info("Starting Flask server...")
+    app.run(host="0.0.0.0", port=5000, debug=False)
 
-flask_thread = threading.Thread(target=run_flask)
-flask_thread.start()
+# ✅ Main execution
+if __name__ == "__main__":
+    # Start Flask in a thread to keep the app alive
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True  # Ensures Flask stops when main thread exits
+    flask_thread.start()
 
-asyncio.get_event_loop().run_until_complete(bot_app.run_polling())
+    # Run the Telegram bot
+    try:
+        asyncio.run(init_bot())
+    except Exception as e:
+        logger.error(f"Error running bot: {e}")
